@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Review Binary Classifier</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    </head>
+    <body>
+        <div class="container mx-auto py-8 px-24">
+            <header class="border-b pb-4 mb-4">
+                <h1 class="text-2xl font-medium text-gray-900 mb-2">Review Binary Classifier</h1>
+                <p class="mb-8 text-gray-600">Evaluate how good your BirdNET-based binary classifier is against a ground truth dataset.</p>
+                <form id="uploadForm">
+                    <div class="flex gap-8 mb-4">
+                        <fieldset class="border w-1/3 p-4 bg-gray-50 rounded">
+                            <label for="groundTruthCSV" class="block text-sm font-medium text-gray-700">Ground truth CSV</label>
+                            <input type="file" id="groundTruthCSV" name="groundTruthCSV" accept=".csv" class="mt-1 block w-full text-sm text-gray-500"/>
+                        </fieldset>
+                        <fieldset class="border w-1/3 p-4 bg-gray-50 rounded">
+                            <label for="predictionsCSV" class="block text-sm font-medium text-gray-700">Predictions CSV</label>
+                            <input type="file" id="predictionsCSV" name="predictionsCSV" accept=".csv" class="mt-1 block w-full text-sm text-gray-500"/>
+                        </fieldset>
+                        <fieldset class="border w-1/3 p-4 rounded">
+                            <label for="audioFile" class="block text-sm font-medium text-gray-700">Audio File</label>
+                            <input type="file" id="audioFile" name="audioFile" accept="audio/*" class="mt-1 block w-full text-sm text-gray-500"/>
+                        </fieldset>
+                    </div>
+                    <button type="submit" class="px-4 py-2 rounded-md bg-gray-300 text-gray-800">Review</button>
+                </form>
+            </header>
+            <main>
+                <div id="statistics" class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5 mb-6"></div>
+                <div id="audioPlayer" class="mb-6"></div>
+                <div id="timeline-chart"></div>
+            </main>
+        </div>
+
+        <script type="module">
+            function calculateStats(groundTruth, predictions) {
+                const totalChunks = predictions.length;
+                const totalDuration = predictions[predictions.length - 1].end;
+                const positiveChunks = predictions.filter((p, i) => groundTruth[i].value > 0).length;
+                
+                // Calculate ROC AUC
+                const sortedPairs = predictions.map((pred, i) => ({
+                    pred: pred.value,
+                    truth: groundTruth[i].value
+                })).sort((a, b) => b.pred - a.pred);
+                
+                let auc = 0;
+                let truePos = 0;
+                let falsePos = 0;
+                const totalPos = positiveChunks;
+                const totalNeg = totalChunks - positiveChunks;
+                
+                for (const pair of sortedPairs) {
+                    if (pair.truth === 1) {
+                        truePos++;
+                    } else {
+                        falsePos++;
+                        auc += (truePos / totalPos) * (1 / totalNeg);
+                    }
+                }
+
+                return {
+                    totalDuration: totalDuration,
+                    positiveChunks,
+                    percentagePositive: (positiveChunks / totalChunks * 100).toFixed(1),
+                    meanConfidence: (predictions.reduce((sum, p) => sum + p.value, 0) / totalChunks).toFixed(3),
+                    meanPositiveConf: (predictions.filter((p, i) => groundTruth[i].value > 0)
+                        .reduce((sum, p) => sum + p.value, 0) / positiveChunks).toFixed(3),
+                    meanNegativeConf: (predictions.filter((p, i) => groundTruth[i].value === 0)
+                        .reduce((sum, p) => sum + p.value, 0) / (totalChunks - positiveChunks)).toFixed(3),
+                    rocAuc: auc.toFixed(3)
+                };
+            }
+
+            // Update statistics display
+            function updateStats(stats) {
+                const statsContainer = document.getElementById('statistics');
+                statsContainer.innerHTML = `
+                    ${createStatCard('ROC AUC', stats.rocAuc)}
+                    ${createStatCard('Mean Positive Confidence', stats.meanPositiveConf)}
+                    ${createStatCard('Mean Negative Confidence', stats.meanNegativeConf)}
+                    ${createStatCard('Positive Chunks', `${stats.positiveChunks} (${stats.percentagePositive}%)`)}
+                    ${createStatCard('Total Duration', `${Math.floor(stats.totalDuration / 60)}:${(stats.totalDuration % 60).toString().padStart(2, '0')}`)}
+                `;
+            }
+
+            function createStatCard(label, value, subLabel = '') {
+                return `
+                    <div class="bg-gray-50 overflow-hidden shadow rounded-lg">
+                        <div class="px-4 py-5 sm:p-6">
+                            <dt class="mt-1 text-xl font-semibold text-gray-900">${value}</dt>
+                            <dd class="text-sm font-medium text-gray-500 truncate">${label}</dd>
+                        </div>
+                    </div>
+                `;
+            }
+
+            function createPlot(groundTruth, predictions) {
+                // Use predictions for times and maxDuration
+                const times = predictions.map(p => p.start);
+                const maxDuration = predictions[predictions.length - 1].end;
+                
+                function formatTime(seconds) {
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const secs = Math.floor(seconds % 60);
+                    if (hours > 0) {
+                        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                    } else {
+                        return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                    }
+                }
+
+                const data = [
+                    {
+                        x: times,
+                        y: predictions.map(p => p.value),
+                        type: 'bar',
+                        name: 'Confidence',
+                        marker: { color: 'blue' },
+                        hovertemplate: 'Time: %{customdata}<br>Seconds: %{x}<br>Confidence: %{y:.3f}<extra></extra>',
+                        customdata: times.map(formatTime)
+                    },
+                    {
+                        x: times,
+                        y: groundTruth.map(gtChunk => gtChunk.value),
+                        type: 'bar',
+                        name: 'Ground Truth',
+                        marker: { color: 'rgba(255,0,0,0.3)' },
+                        hovertemplate: 'Time: %{customdata}<br>Seconds: %{x}<br>Label: %{y}<extra></extra>',
+                        customdata: times.map(formatTime)
+                    }
+                ];
+
+                const layout = {
+                    autosize: true,
+                    margin: { t: 20, r: 20, b: 40, l: 40 },
+                    xaxis: {
+                        title: 'Time (seconds)',
+                        rangeslider: {},
+                        range: [0, maxDuration],
+                        constrain: 'domain'
+                    },
+                    yaxis: {
+                        title: 'Confidence / Ground Truth',
+                        range: [0, 1],
+                        fixedrange: true
+                    },
+                    showlegend: true,
+                    legend: {
+                        orientation: 'h',
+                        yanchor: 'bottom',
+                        y: 1.02,
+                        xanchor: 'right',
+                        x: 1
+                    },
+                    barmode: 'overlay'
+                };
+
+                const config = {
+                    responsive: true,
+                    scrollZoom: true,
+                    modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+                    displayModeBar: true,
+                    displaylogo: false
+                };
+
+                Plotly.newPlot('timeline-chart', data, layout, config);
+
+                // Add click event listener
+                document.getElementById('timeline-chart').on('plotly_click', function(data) {
+                    if (data.points.length > 0) {
+                        const clickedTime = data.points[0].x;
+                        console.log("clickedTime", clickedTime);
+                        seekAudio(clickedTime);
+                    }
+                });
+
+                // Add a resize listener to make the plot responsive
+                window.addEventListener('resize', function() {
+                    Plotly.Plots.resize('timeline-chart');
+                });
+            }
+
+            function createAudioPlayer(audioFile) {
+                const audio = document.createElement('audio');
+                audio.controls = true;
+                audio.src = URL.createObjectURL(audioFile);
+                audio.className = 'w-full';
+                
+                audio.id = 'audioElement';
+                
+                return audio;
+            }
+
+            function seekAudio(time) {
+                const audio = document.querySelector('audio');
+                if (audio) {
+                    audio.currentTime = time;
+                    audio.play();
+                }
+            }
+
+            function parseCSV(content, isPredictions = false) {
+                const lines = content.trim().split('\n').slice(1); // Remove header
+                const chunkSize = 3;
+                let lastEnd = 0;
+
+                return lines.flatMap(line => {
+                    const [start, end, , , confidence] = line.split(',').map(Number);
+                    const chunks = [];
+
+                    const alignedStart = Math.floor(start / chunkSize) * chunkSize;
+
+                    // Fill gaps before the current chunk, but stop at alignedStart
+                    while (lastEnd < alignedStart) {
+                        chunks.push({ start: lastEnd, end: lastEnd + chunkSize, value: 0 });
+                        lastEnd += chunkSize;
+                    }
+
+                    // Add actual data
+                    if (isPredictions) {
+                        chunks.push({ start, end, value: confidence });
+                        lastEnd = end;
+                    } else {
+                        const alignedEnd = Math.ceil(end / chunkSize) * chunkSize;
+                        
+                        for (let t = alignedStart; t < alignedEnd; t += chunkSize) {
+                            chunks.push({ start: t, end: t + chunkSize, value: 1 });
+                        }
+                        lastEnd = alignedEnd;
+                    }
+
+                    return chunks;
+                });
+            }
+
+            // Add form submit event listener
+            document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                
+                const [groundTruthFile, predictionsFile, audioFile] = ['groundTruthCSV', 'predictionsCSV', 'audioFile']
+                    .map(id => document.getElementById(id).files[0]);
+                
+                if (!groundTruthFile || !predictionsFile) {
+                    alert('Please select both Ground Truth and Predictions CSV files.');
+                    return;
+                }
+
+                try {
+                    [predictions, groundTruth] = await Promise.all([
+                        readFileContent(predictionsFile, true),
+                        readFileContent(groundTruthFile, false)
+                    ]);
+                    
+                    // Ensure ground truth and predictions have the same length
+                    const maxEnd = Math.max(predictions[predictions.length - 1].end, groundTruth[groundTruth.length - 1].end);
+                    padData(groundTruth, maxEnd);
+                    padData(predictions, maxEnd);
+                    
+                    updateVisualization();
+
+                    if (audioFile) {
+                        const audioPlayer = createAudioPlayer(audioFile);
+                        document.getElementById('audioPlayer').innerHTML = '';
+                        document.getElementById('audioPlayer').appendChild(audioPlayer);
+                    }
+                } catch (error) {
+                    console.error('Error processing files:', error);
+                    alert('Error processing files. Please check the console for details.');
+                }
+            });
+
+            function readFileContent(file, isPredictions) {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(parseCSV(e.target.result, isPredictions));
+                    reader.onerror = reject;
+                    reader.readAsText(file);
+                });
+            }
+
+            let groundTruth = [];
+            let predictions = [];
+
+            // Main update function
+            function updateVisualization() {
+                if (groundTruth.length && predictions.length) {
+                    const stats = calculateStats(groundTruth, predictions);
+                    if (stats) {
+                        updateStats(stats);
+                        createPlot(groundTruth, predictions);
+                    } else {
+                        console.error('Failed to calculate stats');
+                        // Clear the statistics and plot if stats calculation fails
+                        document.getElementById('statistics').innerHTML = '';
+                        document.getElementById('timeline-chart').innerHTML = '';
+                    }
+                } else {
+                    // Clear the statistics and plot if no data is available
+                    document.getElementById('statistics').innerHTML = '';
+                    document.getElementById('timeline-chart').innerHTML = '';
+                }
+            }
+
+            function padData(data, maxEnd) {
+                const chunkSize = 3;
+                while (data[data.length - 1].end < maxEnd) {
+                    const lastChunk = data[data.length - 1];
+                    data.push({
+                        start: lastChunk.end,
+                        end: lastChunk.end + chunkSize,
+                        value: 0
+                    });
+                }
+            }
+        </script>
+    </body>
+</html>
