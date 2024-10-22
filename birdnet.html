@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BirdNET.js</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div class="max-w-3xl mx-auto flex flex-col min-h-screen">
+        <section class="py-8 flex flex-col gap-2">
+            <h1 class="text-xl font-medium">BirdNET.js — 100% local species ID</h1>
+            <p>Choose an audio file and have BirdNET predict the species present within seconds.</p>
+        </section>
+        <div id="mainContent">
+            <div id="audioPlayer" class="border border-slate-900 text-slate-100 rounded-md shadow-md mb-8 w-full max-w-3xl sticky top-4 bg-black relative">
+                <div id="label" class="bg-slate-800 p-2 rounded-tl-md rounded-br-md w-fit text-sm">Upload an audio file</div>
+                <button id="clearButton" class="absolute top-2 right-2 hover:text-slate-300">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+                <div id="uploadArea" class="p-4 h-[136px]">
+                    <input type="file" id="audioFile" accept="audio/*" class="w-full" />
+                </div>
+                <div id="waveformContainer" class="hidden">
+                    <div id="waveform" class="w-full p-2"></div>
+                    <div class="flex justify-between items-center px-4 py-2 bg-slate-800 text-sm rounded-b-md">
+                        <div id="currentTime" class="w-[50px]">0:00</div>
+                        <button id="playPause">
+                            <svg id="playIcon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+                            <svg id="pauseIcon" class="hidden" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="10" x2="10" y1="15" y2="9"/><line x1="14" x2="14" y1="15" y2="9"/></svg>
+                        </button>
+                        <div id="duration" class="w-[50px] text-right">0:00</div>
+                    </div>
+                </div>
+            </div>
+            <div id="resultsTable" class="w-full max-w-3xl">
+                <div class="flex flex-wrap font-medium border-b border-gray-300 items-center">
+                    <div class="w-1/5 px-4 py-2">Start (s)</div>
+                    <div class="w-1/5 px-4 py-2">End (s)</div>
+                    <div class="w-3/5 px-4 py-2 flex justify-between items-center">
+                        <span class="block">Top 3 Predictions</span>
+                    </div>
+                </div>
+                <div id="resultsBody"></div>
+            </div>
+        </div>
+        <footer class="py-8 mt-auto text-sm text-gray-500">
+            Made by <a href="https://frederiklarsen.com" class="underline" target="_blank">Frederik Larsen</a> with 
+            <a href="https://github.com/BirdNET/BirdNET-Analyzer" class="underline" target="_blank">BirdNET</a>, 
+            <a href="https://github.com/tensorflow/tfjs" class="underline" target="_blank">TensorFlow.js</a>, 
+            <a href="https://wavesurfer-js.org/" class="underline" target="_blank">wavesurfer.js</a> and 
+            <a href="https://tailwindcss.com" class="underline" target="_blank">TailwindCSS</a>.
+        </footer>
+    </div>
+    <script type="module">
+import WaveSurfer from 'https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js';
+import Spectrogram from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/spectrogram.esm.js';
+import RegionsPlugin from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.esm.js';
+import Minimap from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/minimap.esm.js';
+
+// Extend the wavesurfer.js RegionsPlugin to overlay the regions on top of the spectrogram
+class CustomRegionsPlugin extends RegionsPlugin {
+    static create(options) { return new CustomRegionsPlugin(options); }
+
+    initRegionsContainer() {
+        return Object.assign(document.createElement('div'), {
+            style: 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:5;'
+        });
+    }
+}
+
+// Audio player Singleton
+const AudioPlayer = (function() {
+    let wavesurfer = null;
+    const regions = CustomRegionsPlugin.create();
+    const elt = {
+        fileInput: document.getElementById('audioFile'),
+        label: document.getElementById('label'),
+        uploadArea: document.getElementById('uploadArea'),
+        waveformContainer: document.getElementById('waveformContainer'),
+        playPauseBtn: document.getElementById('playPause'),
+        playIcon: document.getElementById('playIcon'),
+        pauseIcon: document.getElementById('pauseIcon'),
+        currentTimeSpan: document.getElementById('currentTime'),
+        durationSpan: document.getElementById('duration'),
+        clearButton: document.getElementById('clearButton')
+    };
+
+    function clear() {
+        if (wavesurfer) {
+            wavesurfer.destroy();
+            wavesurfer = null;
+        }
+        elt.fileInput.value = '';
+        elt.label.textContent = 'Upload an audio file';
+        elt.uploadArea.classList.remove('hidden');
+        elt.waveformContainer.classList.add('hidden');
+    }
+
+    function createWaveform(file) {
+        if (wavesurfer) wavesurfer.destroy();
+        
+        elt.label.textContent = file.name;
+        elt.uploadArea.classList.add('hidden');
+        elt.waveformContainer.classList.remove('hidden');
+        
+        wavesurfer = WaveSurfer.create({
+            container: '#waveform',
+            height: 0,
+            minPxPerSec: 50,
+            progressColor: '#f1f5f9',
+            plugins: [
+                regions,
+                Spectrogram.create(),
+                Minimap.create({
+                    height: 16,
+                    waveColor: '#f8fafc',
+                    progressColor: '#94a3b8',
+                    overlayColor: '#475569'
+                })
+            ]
+        });
+        
+        wavesurfer.loadBlob(file);
+        
+        setupEventListeners();
+        setupRegionLooping();
+    }
+
+    function setupEventListeners() {
+        elt.playPauseBtn.onclick = () => {
+            wavesurfer.playPause();
+            togglePlayPauseIcon();
+        };
+
+        wavesurfer.on('audioprocess', () => updateTimeDisplay(wavesurfer.getCurrentTime()));
+        wavesurfer.on('ready', () => {
+            updateTimeDisplay(0);
+            elt.durationSpan.textContent = formatTime(wavesurfer.getDuration());
+        });
+        wavesurfer.on('seek', () => updateTimeDisplay(wavesurfer.getCurrentTime()));
+        wavesurfer.on('play pause finish', togglePlayPauseIcon);
+    }
+
+    function setupRegionLooping() {
+        let activeRegion = null;
+        
+        regions.on('region-in', region => activeRegion = region);
+        regions.on('region-out', region => { if (activeRegion === region) region.play(); });
+        regions.on('region-clicked', (region, e) => {
+            e.stopPropagation();
+            activeRegion = region;
+            region.play();
+        });
+        wavesurfer.on('interaction', () => activeRegion = null);
+    }
+
+    function formatTime(seconds) {
+        const [mins, secs] = [Math.floor(seconds / 60), Math.floor(seconds % 60)];
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    function updateTimeDisplay(time) {
+        elt.currentTimeSpan.textContent = formatTime(time);
+    }
+
+    function togglePlayPauseIcon() {
+        const isPlaying = wavesurfer.isPlaying();
+        elt.playIcon.classList.toggle('hidden', isPlaying);
+        elt.pauseIcon.classList.toggle('hidden', !isPlaying);
+    }
+
+    // Public API
+    return {
+        createWaveform,
+        seek: time => wavesurfer && wavesurfer.seekTo(time),
+        addRegion: options => regions && regions.addRegion(options),
+        clearRegions: () => regions && regions.clearRegions(),
+        getCurrentTime: () => wavesurfer ? wavesurfer.getCurrentTime() : 0,
+        getDuration: () => wavesurfer ? wavesurfer.getDuration() : 0,
+        playPause: () => wavesurfer && wavesurfer.playPause(),
+        clear
+    };
+})();
+
+// the BirdNET model is offloaded to a separate worker to keep the main thread responsive
+const worker = new Worker("workers/birdnet-worker.js");
+worker.onmessage = ({ data }) => {
+    if (data.type === 'status' || data.type === 'ready') {
+        console.log(data.type === 'ready' ? 'Model loaded and ready for predictions' : data.message);
+    } else if (data.type === 'result') {
+        addResultToTable(data);
+    }
+};
+worker.postMessage({ type: "init" });
+
+async function processAndPredict() {
+    const fileInput = document.getElementById('audioFile');
+
+    console.log('Decoding audio file...');
+    const file = fileInput.files[0];
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 }); // need to specify sample rate explicitly to avoid the default of 44100
+    const audioBuffer = await audioCtx.decodeAudioData(await file.arrayBuffer());
+    console.log('Audio decoding complete!');
+
+    const audioData = {
+        sampleRate: audioBuffer.sampleRate,
+        length: audioBuffer.length,
+        duration: audioBuffer.duration,
+        numberOfChannels: audioBuffer.numberOfChannels,
+        channelData: audioBuffer.getChannelData(0) // I should look into downmixing the audio to mono instead of just taking the first channel
+    };
+
+    worker.postMessage({ type: 'predict', audioData }, [audioData.channelData.buffer]);
+}
+
+function addResultToTable({ chunkIndex, results }) {
+    const row = document.createElement('div');
+    const startSecond = chunkIndex * 3;
+    const endSecond = startSecond + 3;
+
+    row.className = 'result-row h-[180px] flex items-center border-b border-gray-300 cursor-pointer transition-colors duration-200 hover:bg-gray-100';
+    row.dataset.start = startSecond;
+    row.dataset.end = endSecond;
+    row.id = `chunk-${chunkIndex}`;
+
+    row.innerHTML = `
+        <div class="w-1/5 px-4">${startSecond.toFixed(2)}</div>
+        <div class="w-1/5 px-4">${endSecond.toFixed(2)}</div>
+        <ol class="w-3/5 px-4">
+            ${results.map(({ species, confidence }) => `
+                <li class="mb-2 flex items-center">
+                    <div class="w-1/2 flex flex-col text-sm">
+                        ${species.split('_')[1]}<span class="text-gray-500">${species.split('_')[0]}</span>
+                    </div>
+                    <div class="w-1/2 flex items-center">
+                        <div class="bg-gray-200 h-3 w-full mr-2">
+                            <div class="bg-blue-500 h-3" style="width: ${confidence * 100}%"></div>
+                        </div>
+                        <span class="text-sm">${confidence.toFixed(2)}</span>
+                    </div>
+                </li>`
+            ).join('')}
+        </ol>
+    `;
+
+    row.addEventListener('click', () => highlightChunk(row, startSecond, endSecond));
+
+    const resultsBody = document.getElementById('resultsBody');
+    resultsBody.appendChild(row);
+}
+
+function highlightChunk(row, start, end) {
+    document.querySelectorAll('.result-row').forEach(r => {
+        r.classList.remove('bg-green-200', 'hover:bg-green-300');
+        r.classList.add('hover:bg-gray-100');
+    });
+    AudioPlayer.clearRegions();
+
+    row.classList.add('bg-green-200', 'hover:bg-green-300');
+    row.classList.remove('hover:bg-gray-100');
+
+    const deleteButton = document.createElement('button');
+    deleteButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
+    Object.assign(deleteButton.style, {
+        width: '20px', height: '20px', position: 'absolute', right: '2px', top: '2px',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        backgroundColor: 'rgba(255, 0, 0, 0.7)', color: 'white',
+        borderRadius: '50%', border: 'none', cursor: 'pointer', padding: '2px',
+    });
+    deleteButton.onclick = (e) => {
+        e.stopPropagation();
+        AudioPlayer.clearRegions();
+        row.classList.remove('bg-green-200', 'hover:bg-green-300');
+        row.classList.add('hover:bg-gray-100');
+    };
+
+    AudioPlayer.addRegion({
+        start,
+        end,
+        content: deleteButton,
+        color: 'rgba(255, 255, 255, 0.5)',
+        drag: false,
+        resize: false,
+        id: 'cur-chunk-reg'
+    });
+
+    AudioPlayer.seek(start / AudioPlayer.getDuration());
+}
+
+document.getElementById('clearButton').addEventListener('click', (e) => {
+    e.preventDefault();
+    AudioPlayer.clear();
+    document.getElementById('resultsBody').innerHTML = '';
+});
+
+document.getElementById('audioFile').addEventListener('change', ({ target: { files: [file] } }) => {
+    if (file) {
+        AudioPlayer.createWaveform(file);
+        processAndPredict();
+    } else {
+        AudioPlayer.clear();
+        document.getElementById('resultsBody').innerHTML = '';
+    }
+});
+
+    </script>
+</body>
+</html>
